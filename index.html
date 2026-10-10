@@ -1183,6 +1183,16 @@ function render() {
   renderProfileSelect();
   document.getElementById("sections").innerHTML = CATEGORY_ORDER.map(renderSection).join("");
   renderBanner();
+  syncSelectAllIndeterminate();
+}
+
+function syncSelectAllIndeterminate() {
+  document.querySelectorAll('input[data-action="select-all"]').forEach((box) => {
+    const category = box.dataset.cat;
+    const visible = wordsForCategory(category).filter(matchesSearch);
+    const selected = visible.filter((word) => ui.selected[category].has(word.id)).length;
+    box.indeterminate = selected > 0 && selected < visible.length;
+  });
 }
 
 function renderProfileSelect() {
@@ -1301,6 +1311,9 @@ function renderSection(category) {
   const displayed = sortWordsForCategory(category, words);
   const sortMode = ui.sort[category] || null;
   const sortIcon = sortMode === "asc" ? "↑" : sortMode === "desc" ? "↓" : "↕";
+  const selectedVisible = words.filter((word) => ui.selected[category].has(word.id)).length;
+  const allSelected = words.length > 0 && selectedVisible === words.length;
+  const selectAllBox = `<input type="checkbox" class="select-all" data-action="select-all" data-cat="${category}" ${allSelected ? "checked" : ""} ${words.length ? "" : "disabled"} title="${searching ? "全选当前搜索结果的单词" : "全选本类全部单词"}" aria-label="全选">`;
   return `
     <section class="section" data-category="${category}">
       <div class="section-head">
@@ -1311,7 +1324,7 @@ function renderSection(category) {
         <table>
           <thead>
             <tr>
-              <th class="col-check"></th>
+              <th class="col-check">${selectAllBox}</th>
               <th class="col-word">单词</th>
               <th class="col-meaning">词意</th>
               <th class="col-pos">词性</th>
@@ -2427,8 +2440,28 @@ async function handleGenerateArticle(mode) {
     .filter((word) => word.category !== "basic")
     .map(toPayloadWord);
   const payload = { vocabulary };
-  if (isLong) payload.mode = "long";
-  openProgressModal(isLong ? "正在生成长文（全覆盖）…" : "正在生成文章…");
+  let longScope = "";
+  if (isLong) {
+    payload.mode = "long";
+    const selectedWords = [];
+    const seenIds = new Set();
+    CATEGORY_ORDER.forEach((category) => {
+      ui.selected[category].forEach((id) => {
+        if (seenIds.has(id)) return;
+        const word = getWords().find((item) => item.id === id);
+        if (!word) return;
+        seenIds.add(id);
+        selectedWords.push(word);
+      });
+    });
+    if (selectedWords.length) {
+      payload.targets = selectedWords.map(toPayloadWord);
+      longScope = `已勾选的 ${selectedWords.length} 个单词`;
+    } else {
+      longScope = `全部 ${vocabulary.length} 个单词（未勾选时默认全部）`;
+    }
+  }
+  openProgressModal(isLong ? `正在生成长文（覆盖${longScope}）…` : "正在生成文章…");
   let final = null;
   try {
     if (directAiEnabled()) {
@@ -3661,7 +3694,10 @@ async function generateArticleDirect(payload, onProgress) {
     createdAt: Number(item.createdAt) || 0
   }));
   if (payload && payload.mode === "long") {
-    return generateLongArticleDirect(vocabulary, onProgress);
+    const targetIds = Array.isArray(payload.targets)
+      ? payload.targets.map((item) => String(item.id))
+      : [];
+    return generateLongArticleDirect(vocabulary, onProgress, targetIds);
   }
   const targets = selectTargetsDirect(vocabulary);
   if (!targets.length) throw new Error("请先在高频或中频中添加单词");
@@ -3904,9 +3940,14 @@ function directLongCleanupMessages(sectionEnglish, badWords, vocabulary, title) 
   ];
 }
 
-async function generateLongArticleDirect(vocabulary, onProgress) {
+async function generateLongArticleDirect(vocabulary, onProgress, selectedIds = []) {
   if (!vocabulary.length) throw new Error("词表为空，请先录入单词");
-  const targets = selectAllTargetsDirect(vocabulary);
+  const targets = selectAllTargetsDirect(
+    selectedIds.length
+      ? vocabulary.filter((item) => selectedIds.indexOf(String(item.id)) >= 0)
+      : vocabulary
+  );
+  if (!targets.length) throw new Error("勾选的单词不在词表中，请重新勾选");
   const chunks = chunkTargetsDirect(targets, LONG_ARTICLE_SECTION_SIZE, LONG_ARTICLE_CATEGORIES);
   const sections = [];
   let title = "";
@@ -3914,7 +3955,7 @@ async function generateLongArticleDirect(vocabulary, onProgress) {
   let english = "";
   let translation = "";
   let outsideWords = [];
-  let counted = countEntries("", targets);
+  let counted = countEntries("", vocabulary);
   let validation = validateLongDirect(targets, counted.counts);
   for (let index = 0; index < chunks.length; index += 1) {
     if (onProgress) {
@@ -3955,14 +3996,14 @@ async function generateLongArticleDirect(vocabulary, onProgress) {
     sections.push(section);
     english = [english, section.english.trim()].filter(Boolean).join("\n\n");
     translation = [translation, section.translation.trim()].filter(Boolean).join("\n\n");
-    counted = countEntries(english, targets);
+    counted = countEntries(english, vocabulary);
     validation = validateLongDirect(targets, counted.counts, english);
     outsideWords = findNewContentWords(english, vocabulary, 0);
   }
   const rebuild = () => {
     english = sections.map((item) => String(item.english || "").trim()).filter(Boolean).join("\n\n");
     translation = sections.map((item) => String(item.translation || "").trim()).filter(Boolean).join("\n\n");
-    counted = countEntries(english, targets);
+    counted = countEntries(english, vocabulary);
     validation = validateLongDirect(targets, counted.counts, english);
     outsideWords = findNewContentWords(english, vocabulary, 0);
   };
@@ -4125,6 +4166,17 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   document.getElementById("sections").addEventListener("change", (event) => {
+    const allBox = event.target.closest('[data-action="select-all"]');
+    if (allBox) {
+      const category = allBox.dataset.cat;
+      const visible = wordsForCategory(category).filter(matchesSearch);
+      visible.forEach((word) => {
+        if (allBox.checked) ui.selected[category].add(word.id);
+        else ui.selected[category].delete(word.id);
+      });
+      render();
+      return;
+    }
     const checkbox = event.target.closest('[data-action="select"]');
     if (!checkbox) return;
     const category = checkbox.dataset.cat;
