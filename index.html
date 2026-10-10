@@ -526,6 +526,7 @@
       </div>
       <button class="btn" id="btn-entry">词汇录入</button>
       <button class="btn primary" id="btn-article">文章生成</button>
+      <button class="btn" id="btn-long-article" title="生成覆盖全部类别单词的长文，用于检验孩子认不认识每个单词">生成长文</button>
       <button class="btn icon" id="btn-backup" title="云端备份" aria-label="云端备份">☁</button>
       <button class="btn icon" id="btn-settings" title="AI 设置" aria-label="AI 设置">⚙</button>
     </div>
@@ -771,7 +772,80 @@ function seedForms(text) {
   Array.from(forms).forEach((form) => {
     form.split("=").forEach((part) => add(part));
   });
-  return Array.from(forms);
+  return expandForms(Array.from(forms));
+}
+
+function expandForms(values) {
+  const out = [];
+  const add = (value) => {
+    const cleaned = normalizeKey(String(value == null ? "" : value)).replace(/\s+/g, " ").trim();
+    if (cleaned && !out.includes(cleaned)) out.push(cleaned);
+  };
+  (values || []).forEach(add);
+  out.slice().forEach((form) => {
+    form.split("=").forEach(add);
+    form.split("/").forEach(add);
+  });
+  out.slice().forEach((form) => {
+    if (/(^|\s)be(\s|$)/.test(form)) {
+      ["is", "are", "was", "were", "am"].forEach((replacement) => {
+        add(form.replace(/(^|\s)be(\s|$)/g, (all, before, after) => before + replacement + after));
+      });
+    }
+  });
+  return out;
+}
+
+const IRREGULAR_LEMMAS = {
+  said: "say", went: "go", gone: "go", saw: "see", seen: "see", made: "make",
+  took: "take", taken: "take", got: "get", gotten: "get", came: "come",
+  ran: "run", ate: "eat", eaten: "eat", gave: "give", given: "give",
+  told: "tell", found: "find", knew: "know", known: "know", thought: "think",
+  brought: "bring", sang: "sing", sung: "sing", drew: "draw", drawn: "draw",
+  drank: "drink", slept: "sleep", sat: "sit", stood: "stand", held: "hold",
+  felt: "feel", left: "leave", wrote: "write", written: "write", rode: "ride",
+  flew: "fly", flown: "fly", swam: "swim", threw: "throw", grew: "grow",
+  blew: "blow", broke: "break", chose: "choose", spoke: "speak", woke: "wake",
+  hid: "hide", met: "meet", paid: "pay", sent: "send", spent: "spend",
+  built: "build", bought: "buy", caught: "catch", taught: "teach", kept: "keep",
+  meant: "mean", lost: "lose", won: "win", fell: "fall", began: "begin",
+  begun: "begin", rang: "ring", shone: "shine", children: "child",
+  feet: "foot", teeth: "tooth", men: "man", women: "woman", mice: "mouse",
+  geese: "goose", better: "good", best: "good", worse: "bad", worst: "bad"
+};
+
+function morphCandidates(token) {
+  const word = normalizeKey(String(token || ""));
+  const out = new Set();
+  const add = (value) => {
+    if (value && value.length > 1) out.add(value);
+  };
+  out.add(word);
+  if (Object.prototype.hasOwnProperty.call(IRREGULAR_LEMMAS, word)) out.add(IRREGULAR_LEMMAS[word]);
+  if (word.endsWith("'s")) add(word.slice(0, -2));
+  if (word.endsWith("ies")) add(word.slice(0, -3) + "y");
+  if (word.endsWith("es")) { add(word.slice(0, -2)); add(word.slice(0, -1)); }
+  if (word.endsWith("s") && !word.endsWith("ss")) add(word.slice(0, -1));
+  if (word.endsWith("ied")) add(word.slice(0, -3) + "y");
+  if (word.endsWith("ed")) {
+    add(word.slice(0, -2));
+    add(word.slice(0, -1));
+    if (word.length > 4 && word[word.length - 3] === word[word.length - 4]) add(word.slice(0, -3));
+  }
+  if (word.endsWith("ing")) {
+    add(word.slice(0, -3));
+    add(word.slice(0, -3) + "e");
+    if (word.length > 5 && word[word.length - 4] === word[word.length - 5]) add(word.slice(0, -4));
+  }
+  if (word.endsWith("er")) {
+    add(word.slice(0, -2));
+    if (word.endsWith("ier")) add(word.slice(0, -3) + "y");
+  }
+  if (word.endsWith("est")) {
+    add(word.slice(0, -3));
+    if (word.endsWith("iest")) add(word.slice(0, -4) + "y");
+  }
+  return out;
 }
 
 function seedYouyouWords() {
@@ -1338,7 +1412,7 @@ function renderBanner() {
   }
   if (!ui.serverOnline) {
     banner.className = "banner show";
-    banner.innerHTML = '在线版为纯静态展示，AI 生成需在本机运行 start.bat。本地词库编辑和云端备份仍可使用。';
+    banner.innerHTML = 'AI 服务未启动：请双击 <b>start.bat</b>，再通过 http://127.0.0.1:8765 打开。本地词库编辑不受影响。';
   } else if (!ui.aiConfigured) {
     banner.className = "banner show";
     banner.innerHTML = '尚未配置 AI：点击右上角 ⚙，默认已填好 DeepSeek，填入 API Key 即可使用。';
@@ -1597,6 +1671,13 @@ function articleModalHtml(article) {
         </tr>`;
     }).join("");
   const newWords = Array.isArray(article.newWords) ? article.newWords : [];
+  const isLongArticle = article.mode === "long" && article.coverage;
+  const coverageLine = isLongArticle
+    ? `已覆盖 ${Number(article.coverage.covered) || 0}/${Number(article.coverage.total) || 0} 个单词 · 超纲实词 ${Number(article.coverage.outOfListCount) || 0}/${Number(article.coverage.outOfListLimit) || 10}`
+    : "";
+  const missingWords = isLongArticle && Array.isArray(article.coverage.missing)
+    ? article.coverage.missing
+    : [];
   const newWordRows = newWords.map((item) => {
     const exists = getWords().some((word) => word.key === normalizeKey(item.word));
     return `
@@ -1612,8 +1693,12 @@ function articleModalHtml(article) {
     <div class="modal-backdrop">
       <div class="modal wide">
         <h3>${escapeHtml(article.title || "英语短文")}</h3>
-        <div class="article-meta">${formatDate(article.createdAt)} · ${article.valid ? "频率达标" : "频率未完全达标"}${article.repairRounds ? ` · 已自动重写 ${article.repairRounds} 轮` : ""}</div>
+        <div class="article-meta">${formatDate(article.createdAt)} · ${isLongArticle
+          ? (article.valid ? "长文·全覆盖达标" : "长文·覆盖未达标")
+          : (article.valid ? "频率达标" : "频率未完全达标")}${article.repairRounds ? ` · 已自动补写 ${article.repairRounds} 轮` : ""}</div>
+        ${coverageLine ? `<div class="article-meta">${coverageLine}</div>` : ""}
         ${article.valid ? "" : `<div class="article-warning">${escapeHtml(article.warning || "频率未完全达标")}</div>`}
+        ${missingWords.length ? `<div class="article-warning">未出现的单词：${escapeHtml(missingWords.join("、"))}</div>` : ""}
         <div class="article-body">${body}</div>
         <h4>重点词表</h4>
         <div class="table-wrap">
@@ -2313,36 +2398,46 @@ function toPayloadWord(word) {
   };
 }
 
-async function handleGenerateArticle() {
-  const hasTargets = getWords().some(
-    (word) => word.category === "high" || word.category === "medium"
-  );
-  if (!hasTargets) {
-    toast("请先在高频或中频中添加单词", "warn");
-    return;
+async function handleGenerateArticle(mode) {
+  const isLong = mode === "long";
+  if (isLong) {
+    if (!getWords().length) {
+      toast("词表为空，请先录入单词", "warn");
+      return;
+    }
+  } else {
+    const hasTargets = getWords().some(
+      (word) => word.category === "high" || word.category === "medium"
+    );
+    if (!hasTargets) {
+      toast("请先在高频或中频中添加单词", "warn");
+      return;
+    }
   }
   if (!ui.serverOnline && !directAiEnabled()) {
     toast("AI 服务未启动，请双击 start.bat", "warn");
     return;
   }
   if (!ui.aiConfigured) {
-    await openSettingsModal(() => handleGenerateArticle());
+    await openSettingsModal(() => handleGenerateArticle(mode));
     return;
   }
   const vocabulary = getWords().map(toPayloadWord);
   const countWords = getWords()
     .filter((word) => word.category !== "basic")
     .map(toPayloadWord);
-  openProgressModal("正在生成文章…");
+  const payload = { vocabulary };
+  if (isLong) payload.mode = "long";
+  openProgressModal(isLong ? "正在生成长文（全覆盖）…" : "正在生成文章…");
   let final = null;
   try {
     if (directAiEnabled()) {
-      final = await generateArticleDirect({ vocabulary }, (event) => {
+      final = await generateArticleDirect(payload, (event) => {
         updateProgressModal(event.message || "生成中…", event.current, event.total);
       });
     } else {
       await streamArticle(
-        { vocabulary },
+        payload,
         (event) => {
           if (event.event === "progress") {
             updateProgressModal(event.data.message || "生成中…", event.data.current, event.data.total);
@@ -2422,6 +2517,8 @@ function saveArticle(result, countWords) {
     newWords: Array.isArray(result.newWords) ? result.newWords : [],
     wordCounts: result.wordCounts || {},
     categoryStats: result.categoryStats || {},
+    mode: result.mode === "long" ? "long" : "standard",
+    coverage: result.coverage && typeof result.coverage === "object" ? result.coverage : null,
     valid: !!result.valid,
     warning: result.warning || "",
     repairRounds: Number(result.repairRounds) || 0,
@@ -2452,7 +2549,13 @@ function saveArticle(result, countWords) {
   closeModal();
   render();
   openArticleModal(article.id);
-  if (article.valid) {
+  if (article.mode === "long") {
+    if (article.valid) {
+      toast("长文生成完成，全部单词均已覆盖");
+    } else {
+      toast("长文已生成，但有单词未覆盖或超纲词过多，请查看提示", "warn");
+    }
+  } else if (article.valid) {
     toast("文章生成完成，重复次数已累计");
   } else {
     toast("文章已生成，但频率未完全达标，请查看提示", "warn");
@@ -3260,9 +3363,11 @@ function findMatches(text, entries) {
   const candidates = [];
   entries.forEach((entry) => {
     const base = normalizeKey(String(entry.key || entry.text || entry.word || ""));
-    const forms = new Set();
-    (entry.forms || []).forEach((form) => forms.add(normalizeKey(String(form))));
-    forms.add(normalizeKey(String(entry.text || entry.word || "")));
+    const forms = new Set(expandForms([
+      base,
+      normalizeKey(String(entry.text || entry.word || "")),
+      ...(entry.forms || [])
+    ]));
     if (base) forms.add(base);
     forms.forEach((form) => {
       if (!form) return;
@@ -3339,12 +3444,15 @@ function selectTargetsDirect(vocabulary) {
   return [...pick("high", 5), ...pick("medium", 10)];
 }
 
-function chunkTargetsDirect(targets, size) {
+function chunkTargetsDirect(targets, size, categories) {
+  const categoryOrder = Array.isArray(categories) && categories.length
+    ? categories
+    : ["high", "medium"];
   const total = targets.length;
   if (total <= size) return [targets];
   const count = Math.ceil(total / size);
   const chunks = Array.from({ length: count }, () => []);
-  ["high", "medium"].forEach((category) => {
+  categoryOrder.forEach((category) => {
     targets.filter((item) => item.category === category).forEach((item, index) => {
       chunks[index % count].push(item);
     });
@@ -3426,7 +3534,21 @@ const DIRECT_STOPWORDS = new Set([
   "a","an","the","and","or","but","if","because","so","then","than","as","of","to","in","on","at","for","with","from","by","about","into","over","under","after","before","up","down","out","off","again","very","too","also","not","no","yes","i","you","he","she","it","we","they","me","him","her","us","them","my","your","his","its","our","their","this","that","these","those","there","here","is","am","are","was","were","be","been","being","do","does","did","done","have","has","had","can","could","will","would","shall","should","may","might","must","please","hello"
 ]);
 
-function findNewContentWords(english, vocabulary) {
+[
+  "everyone", "everybody", "someone", "somebody", "nobody", "anyone", "anybody",
+  "something", "anything", "everything", "nothing", "somewhere", "anywhere",
+  "everywhere", "ok", "oh", "hi", "bye", "yeah", "sure", "maybe", "well",
+  "goodbye", "wow", "hooray", "who", "whom", "whose", "when", "why", "how",
+  "which", "what", "much", "more", "most", "many", "another", "lot", "just",
+  "only", "still", "even", "really", "always", "never", "sometimes", "soon",
+  "later", "else", "both", "each", "every", "any", "again", "then", "also"
+].forEach((word) => DIRECT_STOPWORDS.add(word));
+
+function findNewContentWords(english, vocabulary, limit) {
+  // limit === 0 means "return every out-of-list word"; undefined means top 30.
+  const maxItems = limit === 0
+    ? Infinity
+    : (typeof limit === "number" && limit > 0 ? limit : 30);
   const known = new Set();
   vocabulary.forEach((item) => {
     const text = normalizeKey(String(item.text || item.word || ""));
@@ -3439,16 +3561,23 @@ function findNewContentWords(english, vocabulary) {
     });
   });
   const counts = {};
+  const capitalizedOnly = {};
   (String(english || "").match(/[A-Za-z]+(?:'[A-Za-z]+)?/g) || []).forEach((token) => {
     let word = normalizeKey(token);
     if (word.length < 2) return;
     if (word.endsWith("'s") && word.length > 2) word = word.slice(0, -2);
+    const isCapitalized = /^[A-Z]/.test(token);
+    capitalizedOnly[word] = Object.prototype.hasOwnProperty.call(capitalizedOnly, word)
+      ? (capitalizedOnly[word] && isCapitalized)
+      : isCapitalized;
     if (DIRECT_STOPWORDS.has(word) || known.has(word)) return;
+    if (Array.from(morphCandidates(word)).some((candidate) => known.has(candidate))) return;
     counts[word] = (counts[word] || 0) + 1;
   });
-  return Object.keys(counts)
-    .sort((a, b) => counts[b] - counts[a] || a.localeCompare(b))
-    .slice(0, 30)
+  const ordered = Object.keys(counts)
+    .filter((word) => !capitalizedOnly[word])
+    .sort((a, b) => counts[b] - counts[a] || a.localeCompare(b));
+  return (maxItems === Infinity ? ordered : ordered.slice(0, maxItems))
     .map((word) => ({ word, count: counts[word] }));
 }
 
@@ -3524,13 +3653,16 @@ async function generateArticleDirect(payload, onProgress) {
     text: String(item.text || ""),
     key: normalizeKey(item.key || item.text),
     category: item.category,
-    forms: (Array.isArray(item.forms) ? item.forms : []).map(normalizeKey).filter(Boolean),
+    forms: expandForms((Array.isArray(item.forms) ? item.forms : []).map(normalizeKey).filter(Boolean)),
     meaning: item.meaning || "",
     partOfSpeech: item.partOfSpeech || "",
     meanings: item.meanings || [],
     count: Number(item.count) || 0,
     createdAt: Number(item.createdAt) || 0
   }));
+  if (payload && payload.mode === "long") {
+    return generateLongArticleDirect(vocabulary, onProgress);
+  }
   const targets = selectTargetsDirect(vocabulary);
   if (!targets.length) throw new Error("请先在高频或中频中添加单词");
   const targetIds = new Set(targets.map((item) => item.id));
@@ -3604,11 +3736,371 @@ async function generateArticleDirect(payload, onProgress) {
     repairRounds
   };
 }
+
+const LONG_ARTICLE_CATEGORIES = ["high", "medium", "low", "familiar", "basic"];
+const LONG_ARTICLE_OUT_OF_LIST_LIMIT = 10;
+const LONG_ARTICLE_SECTION_SIZE = 25;
+const LONG_ARTICLE_REPAIR_ROUNDS = 5;
+const LONG_ARTICLE_CLEANUP_ROUNDS = 2;
+
+function selectAllTargetsDirect(vocabulary) {
+  const order = {};
+  LONG_ARTICLE_CATEGORIES.forEach((category, index) => { order[category] = index; });
+  return vocabulary.slice().sort((a, b) => {
+    const left = order[a.category] === undefined ? 99 : order[a.category];
+    const right = order[b.category] === undefined ? 99 : order[b.category];
+    return left - right || String(a.key).localeCompare(String(b.key), "en");
+  });
+}
+
+function validateLongDirect(targets, counts, text) {
+  const present = typeof text === "string" ? findPresentIds(text, targets) : null;
+  return validateLongDirectWith(targets, counts, present);
+}
+
+function findPresentIds(text, entries) {
+  const normalized = normalizeWithMap(text || "").text;
+  const present = new Set();
+  if (!normalized) return present;
+  entries.forEach((entry) => {
+    const id = String(entry.id);
+    const forms = (entry.forms || []).map((form) => normalizeKey(String(form)));
+    const key = normalizeKey(String(entry.key || entry.text || ""));
+    if (key) forms.push(key);
+    for (const form of forms) {
+      if (!form) continue;
+      try {
+        if (new RegExp("(?<![a-z0-9])" + form.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?![a-z0-9])").test(normalized)) {
+          present.add(id);
+          break;
+        }
+      } catch (error) {
+        // 忽略无法编译的形式
+      }
+    }
+  });
+  return present;
+}
+
+function validateLongDirectWith(targets, counts, present) {
+  const has = (item) => (present
+    ? present.has(String(item.id))
+    : (counts[String(item.id)] || 0) > 0);
+  const stats = {};
+  LONG_ARTICLE_CATEGORIES.forEach((category) => {
+    const words = targets.filter((item) => item.category === category);
+    if (!words.length) return;
+    const total = words.reduce((sum, word) => sum + (counts[String(word.id)] || 0), 0);
+    const covered = words.filter((word) => has(word)).length;
+    stats[category] = {
+      words: words.length,
+      total,
+      average: total / words.length,
+      covered
+    };
+  });
+  const missing = targets
+    .filter((item) => !has(item))
+    .map((item) => item.text);
+  return {
+    valid: !missing.length,
+    stats,
+    missing,
+    covered: targets.length - missing.length,
+    total: targets.length
+  };
+}
+
+function longPoolPayload(vocabulary) {
+  return Array.from(new Set(vocabulary.map((item) => item.text)))
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b, "en"));
+}
+
+function directLongSectionMessages(chunk, title, theme, previousTail, first, vocabulary, sectionIndex, sectionTotal, outOfListWords) {
+  const shape = first
+    ? '{"title":"英文标题","theme":"一句话主题","english":"英文正文","translation":"简体中文翻译","translationTerms":[{"id":"目标词id","terms":["中文对应词"]}]}'
+    : '{"english":"英文正文","translation":"简体中文翻译","translationTerms":[{"id":"目标词id","terms":["中文对应词"]}]}';
+  const continuity = title || theme || previousTail
+    ? `\nStory title: ${title || "(none)"}\nStory theme: ${theme || "(none)"}\nThe previous part ended with: ${previousTail || "(none)"}\nKeep the same child-friendly daily-life setting; the sentences may be independent and do not need to continue a plot.`
+    : "";
+  const outside = outOfListWords.length
+    ? outOfListWords.map((item) => item.word).join(", ")
+    : "(none yet)";
+  return [
+    {
+      role: "system",
+      content: "You write long, coherent, very simple English stories for Chinese children in grades 1-3. The story is used to check whether a child recognises every word of a vocabulary list. Sentences are short and concrete. Return only valid JSON."
+    },
+    {
+      role: "user",
+      content:
+        `Write part ${sectionIndex + 1} of ${sectionTotal} of a simple English reading sheet for a child.\n` +
+        "Every word in 'Section words' MUST appear at least once in this section, written exactly as given (case does not matter, listed forms are allowed).\n" +
+        "Use the words naturally inside the sentences; never list them.\n" +
+        "The sentences do NOT have to form one continuous story: a series of short, simple, loosely related daily-life sentences is fine (for example about the same family, animals or school day). If a sentence can only be written by using a word the child has not learned, write a different sentence instead.\n" +
+        "Write about 70-110 words for this section, but keep the text very simple and repetitive: reusing pool words several times is good for young readers.\n" +
+        "Use ONLY words from the pool for content; if you need another idea, express it with pool words again instead of a new word.\n" +
+        "Sentences should be 4-8 words, simple present or simple past, easy to read aloud.\n" +
+        "The preferred vocabulary pool lists every word the child has learned. You may ONLY use content words from that pool. Common function words (articles, prepositions, pronouns, auxiliaries, conjunctions) may come from outside the pool. Inflected forms (plural -s, past -ed, -ing) of pool words are fine.\n" +
+        `Across the WHOLE story at most ${LONG_ARTICLE_OUT_OF_LIST_LIMIT} content words may come from outside the pool. Content words already used outside the pool: ${outside}\n` +
+        "The story must stay child-friendly and concrete (family, school, animals, food, toys, weather, daily routines).\n" +
+        "The translation must be natural Simplified Chinese covering this section. In translationTerms, for every target word used, list the Chinese word(s) that actually appear in the translation.\n" +
+        "Section words:\n" + JSON.stringify(directTargetPayload(chunk)) +
+        "\nPreferred vocabulary pool:\n" + JSON.stringify(longPoolPayload(vocabulary)) +
+        continuity +
+        "\nReturn exactly: " + shape
+    }
+  ];
+}
+
+function directLongAppendMessages(missingItems, title, theme, previousTail, vocabulary, outOfListWords) {
+  const outside = outOfListWords.length
+    ? outOfListWords.map((item) => item.word).join(", ")
+    : "(none)";
+  return [
+    {
+      role: "system",
+      content: "You continue long, very simple English stories for Chinese children in grades 1-3. Return only valid JSON."
+    },
+    {
+      role: "user",
+      content:
+        "The story so far has not used these words yet:\n" +
+        JSON.stringify(missingItems.map((item) => ({ word: item.text, forms: item.forms || [] }))) +
+        "\nWrite a few more simple sentences (about 60 words) that use EVERY word listed above at least once. For each one use one of its listed forms verbatim (case does not matter); a form may be a short phrase such as 'is not' or 'there is'. Never list the words; weave them into the sentences.\n" +
+        "Keep the same daily-life theme, keep sentences 4-8 words long, concrete and child-friendly. The sentences do not need to form a continuous story; one short sentence per missing word is perfectly fine.\n" +
+        "Only use content words from the preferred vocabulary pool plus the words listed above. Content words already used outside the pool: " +
+        outside +
+        ` (at most ${LONG_ARTICLE_OUT_OF_LIST_LIMIT} are allowed in the whole story).\n` +
+        "Translation must be natural Simplified Chinese for the new section. In translationTerms list the Chinese words actually used.\n" +
+        "Story title: " + (title || "(none)") +
+        "\nStory theme: " + (theme || "(none)") +
+        "\nPrevious section ended with: " + (previousTail || "(none)") +
+        "\nPreferred vocabulary pool:\n" + JSON.stringify(longPoolPayload(vocabulary)) +
+        '\nReturn exactly: {"english":"英文正文","translation":"简体中文翻译","translationTerms":[{"id":"目标词id","terms":["中文对应词"]}]}'
+    }
+  ];
+}
+
+function directLongCleanupMessages(sectionEnglish, badWords, vocabulary, title) {
+  return [
+    {
+      role: "system",
+      content: "You rewrite very simple English stories for Chinese children in grades 1-3 without introducing new vocabulary. Return only valid JSON."
+    },
+    {
+      role: "user",
+      content:
+        "Rewrite the story section below so that it stays exactly as easy to read, but every one of these content words is replaced by words from the preferred vocabulary pool: " +
+        JSON.stringify(badWords) +
+        "\nRules: never use a content word that is not in the preferred vocabulary pool; keep every pool word that already appears in the section (repeating pool words is fine); keep the same characters, the same story meaning and about the same length; sentences stay 4-8 words long and use simple present or simple past.\n" +
+        "Story title: " + (title || "(none)") +
+        "\nPreferred vocabulary pool:\n" + JSON.stringify(longPoolPayload(vocabulary)) +
+        "\nSection to rewrite:\n" + sectionEnglish +
+        "\nAlso return the natural Simplified Chinese translation of the rewritten section.\n" +
+        'Return exactly: {"english":"英文正文","translation":"简体中文翻译"}'
+    }
+  ];
+}
+
+async function generateLongArticleDirect(vocabulary, onProgress) {
+  if (!vocabulary.length) throw new Error("词表为空，请先录入单词");
+  const targets = selectAllTargetsDirect(vocabulary);
+  const chunks = chunkTargetsDirect(targets, LONG_ARTICLE_SECTION_SIZE, LONG_ARTICLE_CATEGORIES);
+  const sections = [];
+  let title = "";
+  let theme = "";
+  let english = "";
+  let translation = "";
+  let outsideWords = [];
+  let counted = countEntries("", targets);
+  let validation = validateLongDirect(targets, counted.counts);
+  for (let index = 0; index < chunks.length; index += 1) {
+    if (onProgress) {
+      onProgress({
+        stage: "section",
+        current: index + 1,
+        total: chunks.length,
+        message: `正在撰写第 ${index + 1}/${chunks.length} 段（本段需覆盖 ${chunks[index].length} 个词）…`
+      });
+    }
+    const text = await directChat(
+      directLongSectionMessages(
+        chunks[index],
+        title,
+        theme,
+        english ? english.slice(-260) : "",
+        index === 0,
+        vocabulary,
+        index,
+        chunks.length,
+        outsideWords
+      ),
+      { jsonMode: true, maxTokens: 4096, temperature: 0.7 }
+    );
+    const data = parseJsonFromText(text);
+    const section = {
+      title: String(data.title || ""),
+      theme: String(data.theme || ""),
+      english: String(data.english || data.article || data.text || ""),
+      translation: String(data.translation || data.chinese || ""),
+      translationTerms: Array.isArray(data.translationTerms) ? data.translationTerms : []
+    };
+    if (!section.english) throw new Error("AI 没有返回英文正文");
+    if (index === 0) {
+      title = section.title || "A Long Story";
+      theme = section.theme || title;
+    }
+    sections.push(section);
+    english = [english, section.english.trim()].filter(Boolean).join("\n\n");
+    translation = [translation, section.translation.trim()].filter(Boolean).join("\n\n");
+    counted = countEntries(english, targets);
+    validation = validateLongDirect(targets, counted.counts, english);
+    outsideWords = findNewContentWords(english, vocabulary, 0);
+  }
+  const rebuild = () => {
+    english = sections.map((item) => String(item.english || "").trim()).filter(Boolean).join("\n\n");
+    translation = sections.map((item) => String(item.translation || "").trim()).filter(Boolean).join("\n\n");
+    counted = countEntries(english, targets);
+    validation = validateLongDirect(targets, counted.counts, english);
+    outsideWords = findNewContentWords(english, vocabulary, 0);
+  };
+  const appendMissing = async (limit, stage) => {
+    let rounds = 0;
+    while (!validation.valid && rounds < limit && english) {
+      rounds += 1;
+      const missingItems = targets.filter((item) => (counted.counts[String(item.id)] || 0) <= 0);
+      if (onProgress) {
+        onProgress({
+          stage,
+          current: rounds,
+          total: limit,
+          message: `还有 ${missingItems.length} 个词未出现，正在补写（第 ${rounds}/${limit} 轮）…`
+        });
+      }
+      const text = await directChat(
+        directLongAppendMessages(
+          missingItems,
+          title,
+          theme,
+          english.slice(-260),
+          vocabulary,
+          outsideWords
+        ),
+        { jsonMode: true, maxTokens: 4096, temperature: 0.6 }
+      );
+      const data = parseJsonFromText(text);
+      const extra = {
+        english: String(data.english || data.article || data.text || ""),
+        translation: String(data.translation || data.chinese || ""),
+        translationTerms: Array.isArray(data.translationTerms) ? data.translationTerms : []
+      };
+      if (extra.english) {
+        sections.push(extra);
+        rebuild();
+      }
+    }
+    return rounds;
+  };
+  let repairRounds = await appendMissing(LONG_ARTICLE_REPAIR_ROUNDS, "repair");
+  let cleanupRounds = 0;
+  while (outsideWords.length > LONG_ARTICLE_OUT_OF_LIST_LIMIT && cleanupRounds < LONG_ARTICLE_CLEANUP_ROUNDS) {
+    cleanupRounds += 1;
+    const badWords = outsideWords.map((item) => item.word);
+    let touched = 0;
+    for (let index = 0; index < sections.length; index += 1) {
+      const text = String(sections[index].english || "");
+      const lowered = text.toLowerCase();
+      const hits = badWords.filter((word) => new RegExp("(?<![a-z])" + word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?![a-z])").test(lowered));
+      if (!hits.length) continue;
+      touched += 1;
+      if (onProgress) {
+        onProgress({
+          stage: "cleanup",
+          current: touched,
+          total: sections.length,
+          message: `正在把第 ${index + 1}/${sections.length} 段的超纲词换成词表里的单词…`
+        });
+      }
+      try {
+        const raw = await directChat(
+          directLongCleanupMessages(text, hits, vocabulary, title),
+          { jsonMode: true, maxTokens: 4096, temperature: 0.4 }
+        );
+        const cleaned = parseJsonFromText(raw);
+        const nextEnglish = String(cleaned.english || cleaned.article || cleaned.text || "");
+        const improved = nextEnglish
+          && findNewContentWords(nextEnglish, vocabulary, 0).length
+            < findNewContentWords(text, vocabulary, 0).length;
+        if (improved) {
+          sections[index].english = nextEnglish;
+          const nextTranslation = String(cleaned.translation || cleaned.chinese || "");
+          if (nextTranslation) sections[index].translation = nextTranslation;
+        }
+      } catch (error) {
+        // 改写失败时保留原段落，最后由超纲词统计如实提示。
+      }
+    }
+    if (!touched) break;
+    rebuild();
+  }
+  if (cleanupRounds && !validation.valid) {
+    repairRounds += await appendMissing(2, "repair");
+  }
+  const highMedium = targets.filter((item) => ARTICLE_CATEGORIES.indexOf(item.category) >= 0);
+  const highMediumIds = new Set(highMedium.map((item) => String(item.id)));
+  const outOfListOk = outsideWords.length <= LONG_ARTICLE_OUT_OF_LIST_LIMIT;
+  const valid = validation.valid && outOfListOk;
+  const problems = [];
+  if (validation.missing.length) {
+    problems.push(
+      `以下 ${validation.missing.length} 个词没有出现：${validation.missing.slice(0, 40).join("、")}`
+    );
+  }
+  if (!outOfListOk) {
+    problems.push(
+      `超纲实词 ${outsideWords.length} 个（要求不超过 ${LONG_ARTICLE_OUT_OF_LIST_LIMIT} 个）：${outsideWords.slice(0, 30).map((item) => item.word).join("、")}`
+    );
+  }
+  const translationTerms = collectTranslationTerms(sections);
+  return {
+    mode: "long",
+    title,
+    theme,
+    english,
+    translation,
+    targets: highMedium.map((item) => ({
+      id: item.id, text: item.text, key: item.key, category: item.category,
+      forms: item.forms, meaning: item.meaning, partOfSpeech: item.partOfSpeech,
+      meanings: item.meanings
+    })),
+    matches: counted.matches.filter((match) => highMediumIds.has(String(match.wordId))),
+    translationMatches: findCnMatches(translation, highMedium, translationTerms),
+    newWords: outsideWords.slice(0, 30),
+    wordCounts: counted.counts,
+    categoryStats: validation.stats,
+    coverage: {
+      covered: validation.covered,
+      total: validation.total,
+      missing: validation.missing.slice(0, 60),
+      missingCount: validation.missing.length,
+      outOfListCount: outsideWords.length,
+      outOfListLimit: LONG_ARTICLE_OUT_OF_LIST_LIMIT,
+      outOfList: outsideWords.slice(0, 30).map((item) => item.word)
+    },
+    valid,
+    warning: problems.join("；"),
+    repairRounds
+  };
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
   seedYouyouWords();
   render();
   document.getElementById("btn-entry").addEventListener("click", () => openEntryModal());
-  document.getElementById("btn-article").addEventListener("click", handleGenerateArticle);
+  document.getElementById("btn-article").addEventListener("click", () => handleGenerateArticle("standard"));
+  document.getElementById("btn-long-article").addEventListener("click", () => handleGenerateArticle("long"));
   document.getElementById("btn-settings").addEventListener("click", () => openSettingsModal());
   document.getElementById("btn-backup").addEventListener("click", openBackupModal);
   document.getElementById("profile-select").addEventListener("change", (event) => switchProfile(event.target.value));
