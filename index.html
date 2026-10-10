@@ -558,6 +558,8 @@ const YOUYOU_SEED_FLAG = "yoyo-youyou-seed-v8";
 const YOUYOU_FILL_FLAG = "yoyo-youyou-fill-v3";
 const BACKUP_CONFIG_KEY = "yoyo-backup-config-v1";
 const BACKUP_PRE_RESTORE_KEY = "yoyo-english-pre-restore-v1";
+const DIRECT_AI_CONFIG_KEY = "yoyo-direct-ai-config-v1";
+const IS_GITHUB_PAGES = location.hostname.endsWith("github.io");
 const DEFAULT_BACKUP_CONFIG = {
   repo: "wantianxiangsean/yoyo-english-backup",
   branch: "main",
@@ -578,7 +580,8 @@ let ui = {
   modal: null,
   serverOnline: false,
   aiConfigured: false,
-  config: { baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", hasKey: false }
+  config: { baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", hasKey: false },
+  directAi: loadDirectAiConfig()
 };
 
 function migrateWord(word) {
@@ -1317,6 +1320,22 @@ function renderBasicRows(words) {
 
 function renderBanner() {
   const banner = document.getElementById("banner");
+  const directReady = !!ui.directAi.apiKey && !!ui.directAi.model;
+  if (IS_GITHUB_PAGES) {
+    if (directReady) {
+      banner.className = "banner";
+      banner.innerHTML = "";
+    } else {
+      banner.className = "banner show";
+      banner.innerHTML = '在线版：点击右上角 ⚙，填写 DeepSeek API Key 后即可使用 AI。Key 只保存在本浏览器。';
+    }
+    return;
+  }
+  if (!ui.serverOnline && directReady) {
+    banner.className = "banner show";
+    banner.innerHTML = '本机后端未启动，正在使用浏览器直连 AI；数据仍保存在本机浏览器。';
+    return;
+  }
   if (!ui.serverOnline) {
     banner.className = "banner show";
     banner.innerHTML = '在线版为纯静态展示，AI 生成需在本机运行 start.bat。本地词库编辑和云端备份仍可使用。';
@@ -1503,12 +1522,15 @@ function backupModalHtml() {
 
 function settingsModalHtml() {
   const config = ui.modal.config || ui.config;
+  const mode = ui.modal.mode || "local";
   const keyHint = config.hasKey ? "已保存 Key；留空表示不修改" : "请输入 API Key";
   return `
     <div class="modal-backdrop">
       <div class="modal">
         <h3>AI 设置</h3>
-        ${ui.serverOnline ? "" : '<div class="article-warning">本机后端未启动。请先关闭本页，双击项目里的 start.bat。</div>'}
+        ${mode === "direct"
+          ? '<div class="form-hint">在线直连模式：Key 只保存在本浏览器 localStorage，不会上传到 GitHub。</div>'
+          : (ui.serverOnline ? "" : '<div class="article-warning">本机后端未启动。请先关闭本页，双击项目里的 start.bat。</div>')}
         <div class="form-row">
           <label>Base URL</label>
           <input id="settings-base" value="${escapeAttr(config.baseUrl || "https://api.deepseek.com/v1")}" placeholder="https://api.deepseek.com/v1">
@@ -1521,8 +1543,11 @@ function settingsModalHtml() {
         <div class="form-row">
           <label>API Key</label>
           <input id="settings-key" type="password" value="" placeholder="${keyHint}" autocomplete="off">
-          <div class="form-hint">Key 只保存到本机后端的 config.json，不会写入浏览器 localStorage。</div>
+          <div class="form-hint">${mode === "direct"
+            ? "Key 仅用于当前浏览器直连 DeepSeek；勾选记住后才会写入本机 localStorage。"
+            : "Key 只保存到本机后端的 config.json，不会写入浏览器 localStorage。"}</div>
         </div>
+        ${mode === "direct" ? `<div class="form-row"><label><input type="checkbox" id="settings-direct-remember" ${config.remember ? "checked" : ""}> 记住 Key（仅本机浏览器）</label></div>` : ""}
         <div class="status-line" id="settings-status"></div>
         <div class="modal-actions">
           <button class="btn" data-modal-action="close">取消</button>
@@ -1649,9 +1674,10 @@ function renderHighlighted(text, matches) {
 }
 
 async function refreshHealth() {
+  const directReady = !!ui.directAi.apiKey && !!ui.directAi.model;
   if (location.protocol === "file:") {
     ui.serverOnline = false;
-    ui.aiConfigured = false;
+    ui.aiConfigured = directReady;
     renderBanner();
     return;
   }
@@ -1659,10 +1685,10 @@ async function refreshHealth() {
     const response = await fetch("/api/health", { cache: "no-store" });
     const data = await response.json();
     ui.serverOnline = !!data.ok;
-    ui.aiConfigured = !!data.aiConfigured;
+    ui.aiConfigured = !!data.aiConfigured || directReady;
   } catch (error) {
     ui.serverOnline = false;
-    ui.aiConfigured = false;
+    ui.aiConfigured = directReady;
   }
   renderBanner();
 }
@@ -1689,17 +1715,34 @@ function closeModal() {
 }
 
 async function openSettingsModal(onSaved) {
-  let config = ui.config;
-  if (ui.serverOnline) {
-    try {
-      const response = await fetch("/api/config", { cache: "no-store" });
-      config = await response.json();
-    } catch (error) {
-      // Keep the last known config.
+  const direct = directAiEnabled();
+  let config;
+  if (direct) {
+    config = {
+      baseUrl: ui.directAi.baseUrl,
+      model: ui.directAi.model,
+      hasKey: !!ui.directAi.apiKey,
+      remember: ui.directAi.remember
+    };
+  } else {
+    config = ui.config;
+    if (ui.serverOnline) {
+      try {
+        const response = await fetch("/api/config", { cache: "no-store" });
+        config = await response.json();
+      } catch (error) {
+        // Keep the last known config.
+      }
     }
+    ui.config = Object.assign({ baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", hasKey: false }, config || {});
+    config = ui.config;
   }
-  ui.config = Object.assign({ baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", hasKey: false }, config || {});
-  ui.modal = { type: "settings", config: ui.config, onSaved: onSaved || null };
+  ui.modal = {
+    type: "settings",
+    mode: direct ? "direct" : "local",
+    config,
+    onSaved: onSaved || null
+  };
   renderModal();
 }
 
@@ -1910,16 +1953,20 @@ async function runSpellingCheck(words) {
         Math.floor(index / chunkSize),
         Math.ceil(words.length / chunkSize)
       );
-      const response = await fetch("/api/check-spelling", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          words: chunk.map((text, offset) => ({ id: `sp-${index + offset}`, text }))
-        })
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-      results.push(...(Array.isArray(data.results) ? data.results : []));
+      const payloadWords = chunk.map((text, offset) => ({ id: `sp-${index + offset}`, text }));
+      if (directAiEnabled()) {
+        const directResults = await checkSpellingDirect(payloadWords);
+        results.push(...directResults);
+      } else {
+        const response = await fetch("/api/check-spelling", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ words: payloadWords })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        results.push(...(Array.isArray(data.results) ? data.results : []));
+      }
     }
   } catch (error) {
     closeModal();
@@ -2088,20 +2135,23 @@ async function fillWordFields(ids) {
     );
     let results = [];
     try {
-      const response = await fetch("/api/fill-word-fields", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          words: batch.map((word) => ({
-            id: word.id,
-            text: word.text,
-            meanings: word.meanings || []
-          }))
-        })
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-      results = Array.isArray(data.results) ? data.results : [];
+      const payloadWords = batch.map((word) => ({
+        id: word.id,
+        text: word.text,
+        meanings: word.meanings || []
+      }));
+      if (directAiEnabled()) {
+        results = await fillWordFieldsDirect(payloadWords);
+      } else {
+        const response = await fetch("/api/fill-word-fields", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ words: payloadWords })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        results = Array.isArray(data.results) ? data.results : [];
+      }
     } catch (error) {
       console.error(error);
     }
@@ -2185,14 +2235,24 @@ async function generateWords(ids, options = {}) {
     );
     let results = [];
     try {
-      const response = await fetch("/api/generate-words", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ words: batch.map((word) => ({ id: word.id, text: word.text })) })
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-      results = Array.isArray(data.results) ? data.results : [];
+      const payloadWords = batch.map((word) => ({
+        id: word.id,
+        text: word.text,
+        key: word.key,
+        forms: word.forms
+      }));
+      if (directAiEnabled()) {
+        results = await generateWordEntriesDirect(payloadWords);
+      } else {
+        const response = await fetch("/api/generate-words", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ words: payloadWords })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        results = Array.isArray(data.results) ? data.results : [];
+      }
     } catch (error) {
       console.error(error);
     }
@@ -2261,7 +2321,7 @@ async function handleGenerateArticle() {
     toast("请先在高频或中频中添加单词", "warn");
     return;
   }
-  if (!ui.serverOnline) {
+  if (!ui.serverOnline && !directAiEnabled()) {
     toast("AI 服务未启动，请双击 start.bat", "warn");
     return;
   }
@@ -2276,18 +2336,24 @@ async function handleGenerateArticle() {
   openProgressModal("正在生成文章…");
   let final = null;
   try {
-    await streamArticle(
-      { vocabulary },
-      (event) => {
-        if (event.event === "progress") {
-          updateProgressModal(event.data.message || "生成中…", event.data.current, event.data.total);
-        } else if (event.event === "done") {
-          final = event.data;
-        } else if (event.event === "error") {
-          throw new Error(event.data.error || "文章生成失败");
+    if (directAiEnabled()) {
+      final = await generateArticleDirect({ vocabulary }, (event) => {
+        updateProgressModal(event.message || "生成中…", event.current, event.total);
+      });
+    } else {
+      await streamArticle(
+        { vocabulary },
+        (event) => {
+          if (event.event === "progress") {
+            updateProgressModal(event.data.message || "生成中…", event.data.current, event.data.total);
+          } else if (event.event === "done") {
+            final = event.data;
+          } else if (event.event === "error") {
+            throw new Error(event.data.error || "文章生成失败");
+          }
         }
-      }
-    );
+      );
+    }
     if (!final) throw new Error("没有收到文章结果");
     saveArticle(final, countWords);
   } catch (error) {
@@ -2536,6 +2602,113 @@ function exportArticle(articleId) {
   toast("已导出 Markdown");
 }
 
+function loadDirectAiConfig() {
+  let stored = {};
+  try {
+    stored = JSON.parse(localStorage.getItem(DIRECT_AI_CONFIG_KEY) || "{}") || {};
+  } catch (error) {
+    stored = {};
+  }
+  return {
+    baseUrl: stored.baseUrl || "https://api.deepseek.com/v1",
+    model: stored.model || "deepseek-chat",
+    apiKey: stored.apiKey || "",
+    remember: !!stored.remember
+  };
+}
+
+function saveDirectAiConfig(config) {
+  const value = {
+    baseUrl: config.baseUrl || "https://api.deepseek.com/v1",
+    model: config.model || "deepseek-chat",
+    apiKey: config.remember ? (config.apiKey || "") : "",
+    remember: !!config.remember
+  };
+  try {
+    localStorage.setItem(DIRECT_AI_CONFIG_KEY, JSON.stringify(value));
+  } catch (error) {
+    console.error(error);
+  }
+  ui.directAi = Object.assign({}, value, { apiKey: config.apiKey || "" });
+  ui.aiConfigured = !!ui.directAi.apiKey && !!ui.directAi.model;
+  return value;
+}
+
+function directAiEnabled() {
+  return IS_GITHUB_PAGES || !ui.serverOnline;
+}
+
+function parseJsonFromText(text) {
+  let value = String(text || "").trim();
+  value = value.replace(/^```[A-Za-z0-9_-]*\s*/, "").replace(/\s*```$/, "");
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    // Continue with bracket extraction.
+  }
+  const starts = [value.indexOf("{"), value.indexOf("[")].filter((index) => index >= 0);
+  if (!starts.length) throw new Error("AI 没有返回 JSON");
+  const start = Math.min.apply(null, starts);
+  const pairs = { "{": "}", "[": "]" };
+  const opening = value[start];
+  const closing = pairs[opening];
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < value.length; index += 1) {
+    const char = value[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === opening) depth += 1;
+    else if (char === closing) {
+      depth -= 1;
+      if (depth === 0) return JSON.parse(value.slice(start, index + 1));
+    }
+  }
+  throw new Error("AI 返回的 JSON 不完整");
+}
+
+async function directChat(messages, options) {
+  const config = ui.directAi;
+  if (!config || !config.apiKey || !config.model) {
+    throw new Error("请先在 AI 设置里填写模型名和 API Key");
+  }
+  const base = String(config.baseUrl || "https://api.deepseek.com/v1").replace(/\/+$/, "");
+  const url = base.endsWith("/chat/completions") ? base : base + "/chat/completions";
+  const body = {
+    model: config.model,
+    messages,
+    temperature: options && options.temperature !== undefined ? options.temperature : 0.6,
+    max_tokens: options && options.maxTokens ? options.maxTokens : 4096
+  };
+  if (options && options.jsonMode) body.response_format = { type: "json_object" };
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer " + config.apiKey
+    },
+    body: JSON.stringify(body)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = data.error && data.error.message ? data.error.message : (data.message || `HTTP ${response.status}`);
+    throw new Error(message);
+  }
+  const choice = data.choices && data.choices[0] && data.choices[0].message;
+  const content = choice && typeof choice.content === "string" ? choice.content : "";
+  if (!content.trim()) throw new Error("AI 返回内容为空");
+  return content;
+}
+
 function loadBackupConfig() {
   let stored = {};
   try {
@@ -2780,6 +2953,38 @@ async function saveSettings() {
   const model = document.getElementById("settings-model").value.trim();
   const apiKey = document.getElementById("settings-key").value.trim();
   const status = document.getElementById("settings-status");
+  const mode = (ui.modal && ui.modal.mode) || "local";
+  if (mode === "direct") {
+    const rememberNode = document.getElementById("settings-direct-remember");
+    const remember = !!(rememberNode && rememberNode.checked);
+    const finalKey = apiKey || ui.directAi.apiKey || "";
+    if (!baseUrl || !model) {
+      if (status) {
+        status.className = "status-line err";
+        status.textContent = "请填写 Base URL 和模型名。";
+      }
+      return;
+    }
+    if (!finalKey) {
+      if (status) {
+        status.className = "status-line err";
+        status.textContent = "请填写 API Key。";
+      }
+      return;
+    }
+    saveDirectAiConfig({
+      baseUrl,
+      model,
+      apiKey: finalKey,
+      remember
+    });
+    const callback = ui.modal && ui.modal.onSaved;
+    closeModal();
+    renderBanner();
+    toast("AI 设置已保存（在线直连模式）");
+    if (typeof callback === "function") callback();
+    return;
+  }
   if (!ui.serverOnline) {
     if (status) {
       status.className = "status-line err";
@@ -2815,9 +3020,37 @@ async function testSettings() {
   const baseUrl = document.getElementById("settings-base").value.trim();
   const model = document.getElementById("settings-model").value.trim();
   const apiKey = document.getElementById("settings-key").value.trim();
+  const mode = (ui.modal && ui.modal.mode) || "local";
   if (status) {
     status.className = "status-line";
     status.textContent = "正在测试连接…";
+  }
+  if (mode === "direct") {
+    const old = ui.directAi;
+    ui.directAi = {
+      baseUrl,
+      model,
+      apiKey: apiKey || old.apiKey || "",
+      remember: old.remember
+    };
+    try {
+      const reply = await directChat(
+        [{ role: "user", content: "Reply with exactly: OK" }],
+        { jsonMode: false, maxTokens: 16, temperature: 0 }
+      );
+      if (status) {
+        status.className = "status-line ok";
+        status.textContent = "连接成功，模型回复：" + reply.slice(0, 80);
+      }
+    } catch (error) {
+      if (status) {
+        status.className = "status-line err";
+        status.textContent = "连接失败：" + error.message;
+      }
+    } finally {
+      ui.directAi = old;
+    }
+    return;
   }
   try {
     const response = await fetch("/api/config/test", {
@@ -2839,6 +3072,538 @@ async function testSettings() {
   }
 }
 
+// ===== Direct online AI mode (GitHub Pages) =====
+function directWordMessages(words) {
+  const payload = words.map((word) => ({ id: word.id, word: word.text }));
+  return [
+    {
+      role: "system",
+      content: "You are an English vocabulary assistant for Chinese primary school students in grades 1-3. Return concise classroom Chinese and very simple English. Always return valid JSON."
+    },
+    {
+      role: "user",
+      content:
+        'For every word or phrase below return exactly {"entries":[{"id":"...","word":"...","meanings":[{"meaning":"中文词意","senses":[{"partOfSpeech":"n.","collocation":"big bed（大床）","sentence":"There is a bed.（有一张床。）"}]}],"forms":["bed","beds"]}]}. ' +
+        "Rules: meanings are different school-level meanings, 1-3 groups, most common first; if one meaning has different parts of speech, keep it as one meaning group with multiple senses; every sense must have non-empty partOfSpeech, collocation and sentence; collocation is a short English phrase plus Chinese in full-width parentheses; sentence is a short grade 1-3 sentence plus Chinese in full-width parentheses; forms lists common variants; keep the same id and word. Input: " +
+        JSON.stringify(payload)
+    }
+  ];
+}
+
+function directFillMessages(words) {
+  const payload = words.map((word) => ({
+    id: word.id,
+    word: word.text,
+    meanings: word.meanings || []
+  }));
+  return [
+    {
+      role: "system",
+      content: "You fill missing vocabulary fields for Chinese primary school students in grades 1-3. Never change the provided Chinese meaning text. Return only valid JSON."
+    },
+    {
+      role: "user",
+      content:
+        "For every word and every existing meaning below, fill in partOfSpeech, collocation and sentence. Keep the meaning text exactly. Every sense must have all three fields non-empty. If one meaning has multiple parts of speech, return multiple senses. Return exactly " +
+        '{"results":[{"id":"...","word":"...","meanings":[{"meaning":"...","senses":[{"partOfSpeech":"...","collocation":"...","sentence":"..."}]}]}]}. Input: ' +
+        JSON.stringify(payload)
+    }
+  ];
+}
+
+function directSpellingMessages(words) {
+  const payload = words.map((word) => ({ id: word.id, text: word.text }));
+  return [
+    {
+      role: "system",
+      content: "You are an English spelling checker for a Chinese children's vocabulary app. Be conservative. Return only valid JSON."
+    },
+    {
+      role: "user",
+      content:
+        'Check every word or phrase. Return exactly {"results":[{"id":"...","original":"...","status":"ok"|"suspect","corrected":"...","message":"中文提示"}]}. status is ok when spelling is correct or it is a proper noun/name; suspect when there is a likely misspelling and corrected is the best correction; message is one short Chinese sentence; if unsure use ok. Input: ' +
+        JSON.stringify(payload)
+    }
+  ];
+}
+
+async function generateWordEntriesDirect(words) {
+  const text = await directChat(directWordMessages(words), {
+    jsonMode: true,
+    maxTokens: 4096,
+    temperature: 0.3
+  });
+  const data = parseJsonFromText(text);
+  const entries = Array.isArray(data.entries) ? data.entries : (Array.isArray(data) ? data : []);
+  const lookup = {};
+  entries.forEach((item) => {
+    if (!item || typeof item !== "object") return;
+    [item.id, item.word, item.text].forEach((key) => {
+      if (key) lookup[normalizeKey(String(key))] = item;
+    });
+  });
+  return words.map((word) => {
+    const item = lookup[normalizeKey(word.id)] || lookup[normalizeKey(word.text)] || null;
+    if (!item) {
+      return { id: word.id, text: word.text, status: "failed", error: "模型没有返回这个词" };
+    }
+    const meanings = normalizeMeanings(item.meanings || item.senses || []);
+    if (!meanings.length && item.meaning) {
+      meanings.push({
+        meaning: item.meaning,
+        senses: [{
+          partOfSpeech: item.partOfSpeech || "",
+          collocation: item.collocation || "",
+          sentence: item.sentence || ""
+        }]
+      });
+    }
+    const forms = Array.isArray(item.forms) ? item.forms.map(normalizeKey).filter(Boolean) : [];
+    if (word.key && !forms.includes(word.key)) forms.unshift(word.key);
+    return {
+      id: word.id,
+      text: word.text,
+      status: "ready",
+      entry: { meanings, forms: Array.from(new Set(forms)) }
+    };
+  });
+}
+
+async function fillWordFieldsDirect(words) {
+  const text = await directChat(directFillMessages(words), {
+    jsonMode: true,
+    maxTokens: 4096,
+    temperature: 0.2
+  });
+  const data = parseJsonFromText(text);
+  const rawResults = Array.isArray(data.results) ? data.results : (Array.isArray(data) ? data : []);
+  const lookup = {};
+  rawResults.forEach((item) => {
+    if (!item || typeof item !== "object") return;
+    [item.id, item.word, item.text].forEach((key) => {
+      if (key) lookup[normalizeKey(String(key))] = item;
+    });
+  });
+  return words.map((word) => {
+    const item = lookup[normalizeKey(word.id)] || lookup[normalizeKey(word.text)] || {};
+    const filled = normalizeMeanings(item.meanings || item.senses || []);
+    const existing = normalizeMeanings(word.meanings || []);
+    return {
+      id: word.id,
+      text: word.text,
+      status: "ready",
+      meanings: mergeFilledMeanings(existing, filled)
+    };
+  });
+}
+
+async function checkSpellingDirect(words) {
+  const text = await directChat(directSpellingMessages(words), {
+    jsonMode: true,
+    maxTokens: 2048,
+    temperature: 0
+  });
+  const data = parseJsonFromText(text);
+  const rawResults = Array.isArray(data.results) ? data.results : (Array.isArray(data) ? data : []);
+  const lookup = {};
+  rawResults.forEach((item) => {
+    if (!item || typeof item !== "object") return;
+    [item.id, item.original, item.text].forEach((key) => {
+      if (key) lookup[normalizeKey(String(key))] = item;
+    });
+  });
+  return words.map((word) => {
+    const item = lookup[normalizeKey(word.id)] || lookup[normalizeKey(word.text)] || {};
+    const original = String(item.original || word.text || "");
+    const corrected = String(item.corrected || item.suggestion || original);
+    let status = String(item.status || "").toLowerCase();
+    if (["correct", "ok", "valid", "good"].includes(status)) status = "ok";
+    else if (["suspect", "incorrect", "misspelled", "error", "typo"].includes(status)) status = "suspect";
+    else status = normalizeKey(corrected) === normalizeKey(original) ? "ok" : "suspect";
+    return {
+      id: word.id,
+      original,
+      status,
+      corrected,
+      message: String(item.message || item.reason || item.note || "")
+    };
+  });
+}
+
+function normalizeWithMap(text) {
+  const chars = [];
+  const indexes = [];
+  for (let index = 0; index < text.length; index += 1) {
+    let char = text[index];
+    if (/\s/.test(char)) {
+      if (chars.length && chars[chars.length - 1] !== " ") {
+        chars.push(" ");
+        indexes.push(index);
+      }
+      continue;
+    }
+    if (char === "\u2018" || char === "\u2019" || char === "`") char = "'";
+    const lowered = char.toLowerCase();
+    chars.push(lowered[0] || char);
+    indexes.push(index);
+  }
+  while (chars.length && chars[chars.length - 1] === " ") {
+    chars.pop();
+    indexes.pop();
+  }
+  return { text: chars.join(""), indexes };
+}
+
+function findMatches(text, entries) {
+  const normalized = normalizeWithMap(text || "");
+  if (!normalized.text) return [];
+  const candidates = [];
+  entries.forEach((entry) => {
+    const base = normalizeKey(String(entry.key || entry.text || entry.word || ""));
+    const forms = new Set();
+    (entry.forms || []).forEach((form) => forms.add(normalizeKey(String(form))));
+    forms.add(normalizeKey(String(entry.text || entry.word || "")));
+    if (base) forms.add(base);
+    forms.forEach((form) => {
+      if (!form) return;
+      let pattern;
+      try {
+        pattern = new RegExp("(?<![a-z0-9])" + form.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?![a-z0-9])", "g");
+      } catch (error) {
+        pattern = new RegExp("(?:^|[^a-z0-9])" + form.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?![a-z0-9])", "g");
+      }
+      let match;
+      while ((match = pattern.exec(normalized.text)) !== null) {
+        const start = match[0].startsWith(form) ? match.index : match.index + (match[0].length - form.length);
+        candidates.push({
+          start,
+          end: start + form.length,
+          wordId: String(entry.id),
+          form,
+          isBase: form === base ? 0 : 1
+        });
+        if (match[0].length === 0) pattern.lastIndex += 1;
+      }
+    });
+  });
+  candidates.sort((a, b) => (b.end - b.start) - (a.end - a.start) || a.isBase - b.isBase || a.start - b.start || a.wordId.localeCompare(b.wordId));
+  const used = new Array(normalized.text.length).fill(false);
+  const accepted = [];
+  candidates.forEach((item) => {
+    let overlaps = false;
+    for (let index = item.start; index < item.end; index += 1) {
+      if (used[index]) { overlaps = true; break; }
+    }
+    if (overlaps) return;
+    for (let index = item.start; index < item.end; index += 1) used[index] = true;
+    accepted.push(item);
+  });
+  accepted.sort((a, b) => a.start - b.start);
+  return accepted.map((item) => ({
+    wordId: item.wordId,
+    form: item.form,
+    start: normalized.indexes[item.start],
+    end: normalized.indexes[item.end - 1] + 1
+  }));
+}
+
+function countEntries(text, entries) {
+  const matches = findMatches(text, entries);
+  const counts = {};
+  entries.forEach((entry) => { counts[String(entry.id)] = 0; });
+  matches.forEach((match) => {
+    counts[match.wordId] = (counts[match.wordId] || 0) + 1;
+  });
+  return { counts, matches };
+}
+
+function validateArticleDirect(targets, counts) {
+  const stats = {};
+  ["high", "medium"].forEach((category) => {
+    const words = targets.filter((item) => item.category === category);
+    if (!words.length) return;
+    const total = words.reduce((sum, word) => sum + (counts[String(word.id)] || 0), 0);
+    stats[category] = { words: words.length, total, average: total / words.length };
+  });
+  const present = ["high", "medium"].filter((category) => stats[category]);
+  const ordered = present.every((category, index) => index === 0 || stats[present[index - 1]].average > stats[category].average);
+  const missing = targets.filter((item) => (counts[String(item.id)] || 0) <= 0).map((item) => item.text);
+  return { valid: ordered && !missing.length, stats, missing };
+}
+
+function selectTargetsDirect(vocabulary) {
+  const pick = (category, limit) => vocabulary
+    .filter((item) => item.category === category)
+    .sort((a, b) => (Number(a.count) || 0) - (Number(b.count) || 0) || (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0) || a.key.localeCompare(b.key))
+    .slice(0, limit);
+  return [...pick("high", 5), ...pick("medium", 10)];
+}
+
+function chunkTargetsDirect(targets, size) {
+  const total = targets.length;
+  if (total <= size) return [targets];
+  const count = Math.ceil(total / size);
+  const chunks = Array.from({ length: count }, () => []);
+  ["high", "medium"].forEach((category) => {
+    targets.filter((item) => item.category === category).forEach((item, index) => {
+      chunks[index % count].push(item);
+    });
+  });
+  return chunks.filter((chunk) => chunk.length);
+}
+
+function collectTranslationTerms(sections) {
+  const merged = {};
+  sections.forEach((section) => {
+    const items = section && Array.isArray(section.translationTerms) ? section.translationTerms : [];
+    items.forEach((item) => {
+      const id = String(item.id || "");
+      if (!id) return;
+      const terms = Array.isArray(item.terms) ? item.terms : (item.terms ? [item.terms] : []);
+      merged[id] = merged[id] || [];
+      terms.forEach((term) => {
+        const value = String(term).trim();
+        if (value && !merged[id].includes(value)) merged[id].push(value);
+      });
+    });
+  });
+  return Object.keys(merged).map((id) => ({ id, terms: merged[id] }));
+}
+
+function findCnMatches(translation, targets, translationTerms) {
+  if (!translation) return [];
+  const termMap = {};
+  (translationTerms || []).forEach((item) => {
+    const id = String(item.id || "");
+    const terms = Array.isArray(item.terms) ? item.terms : (item.terms ? [item.terms] : []);
+    if (id) termMap[id] = terms.map((term) => String(term).trim()).filter(Boolean);
+  });
+  targets.forEach((target) => {
+    const id = String(target.id || "");
+    if (!id || (termMap[id] && termMap[id].length)) return;
+    const meanings = [];
+    (target.meanings || []).forEach((group) => {
+      if (group.meaning) meanings.push(String(group.meaning));
+    });
+    if (target.meaning) meanings.push(String(target.meaning));
+    const parts = [];
+    meanings.forEach((meaning) => {
+      meaning.split(/[；;、,，/]/).forEach((part) => {
+        const value = part.trim();
+        if (value && !parts.includes(value)) parts.push(value);
+      });
+    });
+    termMap[id] = parts;
+  });
+  const candidates = [];
+  Object.keys(termMap).forEach((id) => {
+    termMap[id].forEach((term) => {
+      let start = 0;
+      while (true) {
+        const index = translation.indexOf(term, start);
+        if (index < 0) break;
+        candidates.push({ wordId: id, form: term, start: index, end: index + term.length });
+        start = index + 1;
+      }
+    });
+  });
+  candidates.sort((a, b) => (b.end - b.start) - (a.end - a.start) || a.start - b.start || a.wordId.localeCompare(b.wordId));
+  const used = new Array(translation.length).fill(false);
+  const accepted = [];
+  candidates.forEach((item) => {
+    let overlaps = false;
+    for (let index = item.start; index < item.end; index += 1) {
+      if (used[index]) { overlaps = true; break; }
+    }
+    if (overlaps) return;
+    for (let index = item.start; index < item.end; index += 1) used[index] = true;
+    accepted.push(item);
+  });
+  return accepted.sort((a, b) => a.start - b.start);
+}
+
+const DIRECT_STOPWORDS = new Set([
+  "a","an","the","and","or","but","if","because","so","then","than","as","of","to","in","on","at","for","with","from","by","about","into","over","under","after","before","up","down","out","off","again","very","too","also","not","no","yes","i","you","he","she","it","we","they","me","him","her","us","them","my","your","his","its","our","their","this","that","these","those","there","here","is","am","are","was","were","be","been","being","do","does","did","done","have","has","had","can","could","will","would","shall","should","may","might","must","please","hello"
+]);
+
+function findNewContentWords(english, vocabulary) {
+  const known = new Set();
+  vocabulary.forEach((item) => {
+    const text = normalizeKey(String(item.text || item.word || ""));
+    if (text) known.add(text);
+    (item.forms || []).forEach((form) => {
+      const normalized = normalizeKey(String(form));
+      if (!normalized) return;
+      known.add(normalized);
+      (normalized.match(/[a-z]+/g) || []).forEach((token) => known.add(token));
+    });
+  });
+  const counts = {};
+  (String(english || "").match(/[A-Za-z]+(?:'[A-Za-z]+)?/g) || []).forEach((token) => {
+    let word = normalizeKey(token);
+    if (word.length < 2) return;
+    if (word.endsWith("'s") && word.length > 2) word = word.slice(0, -2);
+    if (DIRECT_STOPWORDS.has(word) || known.has(word)) return;
+    counts[word] = (counts[word] || 0) + 1;
+  });
+  return Object.keys(counts)
+    .sort((a, b) => counts[b] - counts[a] || a.localeCompare(b))
+    .slice(0, 30)
+    .map((word) => ({ word, count: counts[word] }));
+}
+
+function directTargetPayload(targets) {
+  return targets.map((item) => ({
+    id: item.id,
+    word: item.text,
+    category: item.category,
+    meaning: item.meaning || "",
+    meanings: item.meanings || [],
+    forms: item.forms || [item.text]
+  }));
+}
+
+function directPoolPayload(vocabulary) {
+  return vocabulary.map((item) => ({ word: item.text, category: item.category }));
+}
+
+function directArticleMessages(chunk, title, theme, previousTail, first, vocabulary) {
+  const shape = first
+    ? '{"title":"英文标题","theme":"一句话主题","english":"英文正文","translation":"简体中文翻译","translationTerms":[{"id":"目标词id","terms":["中文对应词"]}]}'
+    : '{"english":"英文正文","translation":"简体中文翻译","translationTerms":[{"id":"目标词id","terms":["中文对应词"]}]}';
+  const continuity = title || theme || previousTail
+    ? `\nExisting title: ${title || "(none)"}\nExisting theme: ${theme || "(none)"}\nPrevious section ended with: ${previousTail || "(none)"}\nContinue the same story naturally.`
+    : "";
+  return [
+    {
+      role: "system",
+      content: "You write very simple English short stories for Chinese children in grades 1-3. Use short sentences, concrete daily life scenes, and natural Simplified Chinese translation. Return only valid JSON."
+    },
+    {
+      role: "user",
+      content:
+        "Write one coherent section of a short English story.\n" +
+        "Target words are selected high-frequency and medium-frequency words. Every target must appear at least once, using one of its listed forms exactly.\n" +
+        "When both high and medium targets exist, make average uses per word satisfy high > medium.\n" +
+        "Prefer content words from the preferred vocabulary pool; common function words may come from outside; avoid new content words.\n" +
+        "Low-frequency, familiar and basic pool words are optional.\n" +
+        "Return translationTerms: for every target used, list the Chinese words actually used in the translation.\n" +
+        "Targets:\n" + JSON.stringify(directTargetPayload(chunk)) +
+        "\nPreferred vocabulary pool:\n" + JSON.stringify(directPoolPayload(vocabulary)) +
+        continuity +
+        "\nReturn exactly: " + shape
+    }
+  ];
+}
+
+function directRepairMessages(targets, english, translation, stats, missing, title, theme, vocabulary) {
+  return [
+    {
+      role: "system",
+      content: "You revise very simple English stories for Chinese primary school students in grades 1-3. Return only valid JSON."
+    },
+    {
+      role: "user",
+      content:
+        "The story does not meet the vocabulary requirements.\n" +
+        "Missing targets: " + JSON.stringify(missing) + "\n" +
+        "Current averages: " + JSON.stringify(stats) + "\n" +
+        "Rewrite the full story so every high/medium target appears at least once and, when both exist, high average > medium average.\n" +
+        "Prefer the preferred vocabulary pool; avoid new content words.\n" +
+        "Targets:\n" + JSON.stringify(directTargetPayload(targets)) + "\n" +
+        "Preferred vocabulary pool:\n" + JSON.stringify(directPoolPayload(vocabulary)) + "\n" +
+        "Current title: " + (title || "(none)") + "\nCurrent English:\n" + english + "\nCurrent translation:\n" + translation + "\n" +
+        'Return exactly: {"title":"英文标题","english":"英文正文","translation":"简体中文翻译","translationTerms":[{"id":"目标词id","terms":["中文对应词"]}]}'
+    }
+  ];
+}
+
+async function generateArticleDirect(payload, onProgress) {
+  const vocabulary = (payload.vocabulary || []).map((item) => ({
+    id: String(item.id),
+    text: String(item.text || ""),
+    key: normalizeKey(item.key || item.text),
+    category: item.category,
+    forms: (Array.isArray(item.forms) ? item.forms : []).map(normalizeKey).filter(Boolean),
+    meaning: item.meaning || "",
+    partOfSpeech: item.partOfSpeech || "",
+    meanings: item.meanings || [],
+    count: Number(item.count) || 0,
+    createdAt: Number(item.createdAt) || 0
+  }));
+  const targets = selectTargetsDirect(vocabulary);
+  if (!targets.length) throw new Error("请先在高频或中频中添加单词");
+  const targetIds = new Set(targets.map((item) => item.id));
+  const countWords = vocabulary.filter((item) => item.category !== "basic");
+  const chunks = chunkTargetsDirect(targets, 30);
+  const sections = [];
+  let title = "";
+  let theme = "";
+  for (let index = 0; index < chunks.length; index += 1) {
+    if (onProgress) onProgress({ stage: "section", current: index + 1, total: chunks.length, message: `正在撰写第 ${index + 1}/${chunks.length} 段…` });
+    const text = await directChat(
+      directArticleMessages(chunks[index], title, theme, sections.length ? sections[sections.length - 1].english.slice(-220) : "", index === 0, vocabulary),
+      { jsonMode: true, maxTokens: 4096, temperature: 0.7 }
+    );
+    const data = parseJsonFromText(text);
+    const section = {
+      title: String(data.title || ""),
+      theme: String(data.theme || ""),
+      english: String(data.english || data.article || data.text || ""),
+      translation: String(data.translation || data.chinese || ""),
+      translationTerms: Array.isArray(data.translationTerms) ? data.translationTerms : []
+    };
+    if (!section.english) throw new Error("AI 没有返回英文正文");
+    if (index === 0) {
+      title = section.title || "A Short Story";
+      theme = section.theme || title;
+    }
+    sections.push(section);
+  }
+  let english = sections.map((section) => section.english.trim()).filter(Boolean).join("\n\n");
+  let translation = sections.map((section) => section.translation.trim()).filter(Boolean).join("\n\n");
+  let translationTerms = collectTranslationTerms(sections);
+  let counted = countEntries(english, countWords);
+  let validation = validateArticleDirect(targets, counted.counts);
+  let repairRounds = 0;
+  while (!validation.valid && repairRounds < 2) {
+    repairRounds += 1;
+    if (onProgress) onProgress({ stage: "repair", current: repairRounds, total: 2, message: `频率未达标，正在重写（第 ${repairRounds}/2 轮）…` });
+    const text = await directChat(
+      directRepairMessages(targets, english, translation, validation.stats, validation.missing, title, theme, vocabulary),
+      { jsonMode: true, maxTokens: 4096, temperature: 0.5 }
+    );
+    const data = parseJsonFromText(text);
+    const repairedEnglish = String(data.english || data.article || data.text || "");
+    if (repairedEnglish) {
+      english = repairedEnglish;
+      translation = String(data.translation || data.chinese || translation);
+      title = String(data.title || title);
+      if (Array.isArray(data.translationTerms)) translationTerms = data.translationTerms;
+      counted = countEntries(english, countWords);
+      validation = validateArticleDirect(targets, counted.counts);
+    }
+  }
+  return {
+    title,
+    theme,
+    english,
+    translation,
+    targets: targets.map((item) => ({
+      id: item.id, text: item.text, key: item.key, category: item.category,
+      forms: item.forms, meaning: item.meaning, partOfSpeech: item.partOfSpeech,
+      meanings: item.meanings
+    })),
+    matches: counted.matches.filter((match) => targetIds.has(match.wordId)),
+    translationMatches: findCnMatches(translation, targets, translationTerms),
+    newWords: findNewContentWords(english, vocabulary),
+    wordCounts: counted.counts,
+    categoryStats: validation.stats,
+    valid: validation.valid,
+    warning: validation.valid ? "" : "重写两轮后仍未完全达标：" + JSON.stringify(validation.stats),
+    repairRounds
+  };
+}
 document.addEventListener("DOMContentLoaded", async () => {
   seedYouyouWords();
   render();
