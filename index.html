@@ -850,6 +850,8 @@ function morphCandidates(token) {
 
 function seedYouyouWords() {
   try {
+    // 公开版没有内置词表：不要凭空新建用户，也不要抢走当前用户。
+    if (!YOUYOU_SEED.length) return; /* public_direct_guard */
     if (localStorage.getItem(YOUYOU_SEED_FLAG) === "1") return;
     const youyouProfiles = state.profiles.filter(
       (item) => normalizeKey(item.name) === normalizeKey("默认")
@@ -999,7 +1001,7 @@ async function autoFillYouyouFields() {
       localStorage.setItem(YOUYOU_FILL_FLAG, "1");
       return;
     }
-    if (!ui.serverOnline || !ui.aiConfigured) {
+    if (!(directAiEnabled() || (ui.serverOnline && ui.aiConfigured))) {
       toast("默认词库已导入；配置 AI 后可点“补齐字段”批量生成", "warn");
       return;
     }
@@ -2013,10 +2015,10 @@ async function submitEntry() {
   }
 
   let checked = [];
-  if (ui.serverOnline && ui.aiConfigured) {
+  if ((ui.serverOnline && ui.aiConfigured) || directAiEnabled()) {
     checked = await runSpellingCheck(parsed.valid);
   } else {
-    toast("AI 未配置，已跳过拼写校验", "warn");
+    toast("AI 未配置，已跳过拼写校验（" + aiOfflineHint() + "）", "warn");
   }
   const suspects = checked.filter((item) => {
     const original = String(item.original || "");
@@ -2148,11 +2150,11 @@ async function addNewWordToHigh(text) {
   render();
   toast(`已加入高频：${word.text}`);
 
-  if (!ui.serverOnline) {
+  if (!ui.serverOnline && !directAiEnabled()) {
     word.status = "failed";
     saveState();
     render();
-    toast("AI 服务未启动，词条已保存，可稍后点击重试", "warn");
+    toast("AI 未配置，词条已保存，可稍后点击重试（" + aiOfflineHint() + "）", "warn");
     if (articleId) openArticleModal(articleId);
     return;
   }
@@ -2166,14 +2168,14 @@ async function addNewWordToHigh(text) {
 
 async function maybeGenerateWords(ids) {
   if (!ids.length) return;
-  if (!ui.serverOnline) {
+  if (!ui.serverOnline && !directAiEnabled()) {
     ids.forEach((id) => {
       const word = getWords().find((item) => item.id === id);
       if (word) word.status = "failed";
     });
     saveState();
     render();
-    toast("AI 服务未启动，词条已保存；启动后点击“生成失败，点击重试”", "warn");
+    toast("AI 未配置，词条已保存；配置后点击“生成失败，点击重试”（" + aiOfflineHint() + "）", "warn");
     return;
   }
   if (!ui.aiConfigured) {
@@ -2205,8 +2207,8 @@ async function fillWordFields(ids) {
     .map((id) => getWords().find((word) => word.id === id))
     .filter(Boolean);
   if (!words.length) return;
-  if (!ui.serverOnline) {
-    toast("AI 服务未启动，请先双击 start.bat", "warn");
+  if (!ui.serverOnline && !directAiEnabled()) {
+    toast(aiOfflineHint(), "warn");
     return;
   }
   if (!ui.aiConfigured) {
@@ -2301,11 +2303,11 @@ async function generateWords(ids, options = {}) {
     .map((id) => getWords().find((word) => word.id === id))
     .filter(Boolean);
   if (!words.length) return;
-  if (!ui.serverOnline) {
+  if (!ui.serverOnline && !directAiEnabled()) {
     words.forEach((word) => { word.status = "failed"; });
     saveState();
     render();
-    toast("AI 服务未启动，请先双击 start.bat", "warn");
+    toast(aiOfflineHint(), "warn");
     return;
   }
   if (!ui.aiConfigured) {
@@ -2428,7 +2430,7 @@ async function handleGenerateArticle(mode) {
     }
   }
   if (!ui.serverOnline && !directAiEnabled()) {
-    toast("AI 服务未启动，请双击 start.bat", "warn");
+    toast(aiOfflineHint(), "warn");
     return;
   }
   if (!ui.aiConfigured) {
@@ -2772,6 +2774,12 @@ function saveDirectAiConfig(config) {
 
 function directAiEnabled() {
   return IS_GITHUB_PAGES || !ui.serverOnline;
+}
+
+function aiOfflineHint() {
+  return IS_GITHUB_PAGES
+    ? "AI 还没配置：请点右上角 ⚙ 填写 DeepSeek API Key"
+    : "AI 服务未启动：请双击 start.bat，或在右上角 ⚙ 里改用浏览器直连";
 }
 
 function parseJsonFromText(text) {
